@@ -5,132 +5,78 @@ using UnityEngine;
 
 public class PhotoFrameDisplayFade : MonoBehaviour
 {
-    [Tooltip("子文件夹名称（位于 Application.persistentDataPath 下）")]
     public string folderName = "CapturedPhotos";
-    [Tooltip("每张照片展示时间（秒）")]
     public float switchInterval = 5f;
-    [Tooltip("淡出→切换→淡入 总时间（秒）")]
-    public float fadeDuration = 1f;
+    public float fadeDuration = 1.5f;
+    public Material frameMaterialInstance;
 
-    private List<Texture2D> photos = new List<Texture2D>();
+    private List<Texture2D> photos = new();
     private int currentIndex = 0;
-    private Renderer frameRenderer;
-    private Material frameMaterialInstance;
+    private static readonly int BaseMap = Shader.PropertyToID("_BaseMap");
+    private static readonly int NextMap = Shader.PropertyToID("_NextMap");
+    private static readonly int Blend = Shader.PropertyToID("_Blend");
 
-    private void Start()
+    void Start()
     {
-        frameRenderer = GetComponent<Renderer>();
-        if (frameRenderer == null)
-        {
-            Debug.LogError("PhotoFrameDisplayFade: 需要挂载在有 Renderer 的 GameObject 上。");
-            enabled = false;
-            return;
-        }
-
-        // 使用材质实例，避免修改共享材质
-        frameMaterialInstance = frameRenderer.material;
-
         LoadPhotos();
-
         if (photos.Count == 0)
         {
-            Debug.LogWarning("PhotoFrameDisplayFade: 未发现照片。路径 = " + Path.Combine(Application.persistentDataPath, folderName));
+            Debug.LogWarning($"未发现照片。路径 = {Path.Combine(Application.persistentDataPath, folderName)}");
             return;
         }
 
-        // 随机选择起始图片
-        currentIndex = Random.Range(0, photos.Count);
-        SetTexture(photos[currentIndex]);
+        // 确保我们有材质实例
+        frameMaterialInstance = GetComponent<MeshRenderer>().material;
+        frameMaterialInstance.SetTexture(BaseMap, photos[0]);
+        frameMaterialInstance.SetFloat(Blend, 0f);
 
-        // 确保材质开始完全不透明（alpha = 1）
-        SetMaterialAlpha(1f);
-
-        // 启动切换协程
         StartCoroutine(SwitchLoop());
     }
 
-    private void LoadPhotos()
+    void LoadPhotos()
     {
         string dir = Path.Combine(Application.persistentDataPath, folderName);
-        if (!Directory.Exists(dir))
-            Directory.CreateDirectory(dir);
+        if (!Directory.Exists(dir)) return;
 
-        string[] files = Directory.GetFiles(dir, "*.jpg");
-        foreach (var file in files)
+        foreach (string file in Directory.GetFiles(dir))
         {
-            try
-            {
-                byte[] data = File.ReadAllBytes(file);
-                Texture2D tex = new Texture2D(2, 2);
-                if (tex.LoadImage(data))
-                {
-                    photos.Add(tex);
-                }
-            }
-            catch (System.Exception ex)
-            {
-                Debug.LogWarning("PhotoFrameDisplayFade: 读取照片失败 " + file + " — " + ex.Message);
-            }
+            if (!(file.EndsWith(".jpg") || file.EndsWith(".png"))) continue;
+            byte[] bytes = File.ReadAllBytes(file);
+            Texture2D tex = new Texture2D(2, 2);
+            tex.LoadImage(bytes);
+            photos.Add(tex);
         }
     }
 
-    private IEnumerator SwitchLoop()
+    IEnumerator SwitchLoop()
     {
         while (true)
         {
             yield return new WaitForSeconds(switchInterval);
 
-            // 淡出
-            yield return StartCoroutine(FadeAlpha(1f, 0f, fadeDuration));
+            int nextIndex = (currentIndex + 1) % photos.Count;
+            Texture2D nextTex = photos[nextIndex];
 
-            // 切换图片
-            currentIndex = (currentIndex + 1) % photos.Count;
-            SetTexture(photos[currentIndex]);
-
-            // 淡入
-            yield return StartCoroutine(FadeAlpha(0f, 1f, fadeDuration));
+            frameMaterialInstance.SetTexture(NextMap, nextTex);
+            yield return StartCoroutine(Crossfade());
+            
+            // 完成后更新主贴图
+            frameMaterialInstance.SetTexture(BaseMap, nextTex);
+            frameMaterialInstance.SetFloat(Blend, 0f);
+            currentIndex = nextIndex;
         }
     }
 
-    private void SetTexture(Texture2D tex)
-    {
-        if (frameMaterialInstance.HasProperty("_BaseMap"))
-        {
-            frameMaterialInstance.SetTexture("_BaseMap", tex);
-        }
-        else
-        {
-            frameMaterialInstance.mainTexture = tex;
-        }
-    }
-
-    private IEnumerator FadeAlpha(float from, float to, float duration)
+    IEnumerator Crossfade()
     {
         float elapsed = 0f;
-        while (elapsed < duration)
+        while (elapsed < fadeDuration)
         {
-            float t = elapsed / duration;
-            float alpha = Mathf.Lerp(from, to, t);
-            SetMaterialAlpha(alpha);
+            float t = elapsed / fadeDuration;
+            frameMaterialInstance.SetFloat(Blend, t);
             elapsed += Time.deltaTime;
             yield return null;
         }
-        SetMaterialAlpha(to);
-    }
-
-    private void SetMaterialAlpha(float alpha)
-    {
-        if (frameMaterialInstance.HasProperty("_BaseColor")) // URP Lit shader uses _BaseColor
-        {
-            Color c = frameMaterialInstance.GetColor("_BaseColor");
-            c.a = alpha;
-            frameMaterialInstance.SetColor("_BaseColor", c);
-        }
-        else
-        {
-            Color c = frameMaterialInstance.color;
-            c.a = alpha;
-            frameMaterialInstance.color = c;
-        }
+        frameMaterialInstance.SetFloat(Blend, 1f);
     }
 }

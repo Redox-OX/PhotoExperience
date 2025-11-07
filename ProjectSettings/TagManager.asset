@@ -5,11 +5,12 @@ TagManager:
   serializedVersion: 2
   tags:
   - Anchor
+  - PhotoCamera
   layers:
   - Default
   - TransparentFX
   - Ignore Raycast
-  - 
+  - CameraVolume
   - Water
   - UI
   - Ground

@@ -1,109 +1,154 @@
 using UnityEngine;
 using UnityEngine.InputSystem;
-using UnityEngine.XR.Interaction.Toolkit;
+using UnityEngine.UI;
 
 public class XRPhotoInput : MonoBehaviour
 {
     [Header("References")]
-    public CameraController cameraController;     // 指到你的 CameraController（同一相机）
-    public CustomExposureController exposure;     // 可选：指到你的 CustomExposureController
+    public CameraController cameraController;          // 相机控制脚本
+    public CustomExposureController exposure;          // 可选
 
-    [Header("Grip Inputs (float 0..1)")]
-    public InputActionReference leftGrip;         // XRI LeftHand/Grip（或 GripValue）
-    public InputActionReference rightGrip;        // XRI RightHand/Grip
-                                                  // 若你只有 GripPressed（bool），可改用0/1并调step更小
+    [Header("Float Inputs (0..1)")]
+    public InputActionReference leftGrip;
+    public InputActionReference rightGrip;
+    public InputActionReference rightTrigger;
 
-    [Header("Mode Buttons (bool)")]
-    public InputActionReference buttonA;          // 右手 A / Primary Button
-    public InputActionReference buttonB;          // 右手 B / Secondary Button
-    public InputActionReference buttonX;          // 左手 X / Primary Button
-    public InputActionReference buttonY;          // 左手 Y / Secondary Button
+    [Header("Mode Buttons (bool or float)")]
+    public InputActionReference buttonA;               // A：对焦
+    public InputActionReference buttonB;               // B：ISO
+    public InputActionReference buttonX;               // X：光圈
+    public InputActionReference buttonY;               // Y：快门
 
-    [Header("Shutter (bool)")]
-    public InputActionReference rightTrigger;     // 右手 Trigger（Button 或 value>阈值）
+    [Header("Response")]
+    [Range(0f, 0.5f)] public float gripDeadZone = 0.15f;
+    public AnimationCurve gripCurve = AnimationCurve.EaseInOut(0, 0, 1, 1);
 
-    [Header("Tuning")]
-    public float focalStepPerSec = 40f;           // 焦距 每秒 mm
-    public float focusStepPerSec = 2.0f;          // 对焦距离 每秒 m
-    public float isoStepPerSec   = 400f;          // ISO 每秒
-    public float fStepPerSec     = 2.0f;          // 光圈 f 值 每秒
-    public float shutterStepPerSec = 0.02f;       // 快门 每秒 (s)
-    public float gripDeadZone = 0.15f;            // Grip 死区
-    public float triggerThreshold = 0.5f;         // 触发阈值（如果是浮点）
+    [Header("Rates (per second)")]
+    public float focalStepPerSec = 40f;
+    public float focusStepPerSec = 2.0f;
+    public float isoStepPerSec = 400f;
+    public float apertureStepPerSec = 2.0f;
+    public float shutterStepPerSec = 0.02f;
 
-    float lastTrigger;                             // 上一帧触发值（用于沿用浮点触发）
-    bool shutterDown;
+    [Header("Trigger")]
+    [Range(0f, 1f)] public float triggerThreshold = 0.55f;
+
+    // ========= UI 高亮 =========
+    public enum Mode { Focal, Focus, ISO, Aperture, Shutter }
+
+    [System.Serializable]
+    public class ParamUI
+    {
+        public Image bg;                 // 背景 Image
+        public Color themeColor = Color.white;
+        [HideInInspector] public float weight;
+    }
+
+    [Header("UI Backgrounds & Colors")]
+    public ParamUI focalUI;
+    public ParamUI focusUI;
+    public ParamUI isoUI;
+    public ParamUI apertureUI;
+    public ParamUI shutterUI;
+
+    [Header("UI Visual Settings")]
+    public Color normalColor = new Color(1, 1, 1, 0.25f);
+    public float highlightSpeed = 6f;
+    public bool pulseWhileAdjusting = true;
+    [Range(0.1f, 8f)] public float pulseSpeed = 2.5f;
+    [Range(1f, 2f)] public float pulseIntensity = 1.25f;
+
+    float lastTrigger;
 
     void OnEnable()
     {
-        EnableRef(leftGrip); EnableRef(rightGrip);
-        EnableRef(buttonA);  EnableRef(buttonB);
-        EnableRef(buttonX);  EnableRef(buttonY);
-        EnableRef(rightTrigger);
+        EnableRef(leftGrip); EnableRef(rightGrip); EnableRef(rightTrigger);
+        EnableRef(buttonA); EnableRef(buttonB); EnableRef(buttonX); EnableRef(buttonY);
     }
     void OnDisable()
     {
-        DisableRef(leftGrip); DisableRef(rightGrip);
-        DisableRef(buttonA);  DisableRef(buttonB);
-        DisableRef(buttonX);  DisableRef(buttonY);
-        DisableRef(rightTrigger);
+        DisableRef(leftGrip); DisableRef(rightGrip); DisableRef(rightTrigger);
+        DisableRef(buttonA); DisableRef(buttonB); DisableRef(buttonX); DisableRef(buttonY);
     }
-    void EnableRef(InputActionReference r){ if (r!=null) r.action.Enable(); }
-    void DisableRef(InputActionReference r){ if (r!=null) r.action.Disable(); }
+    void EnableRef(InputActionReference r) { if (r) r.action.Enable(); }
+    void DisableRef(InputActionReference r) { if (r) r.action.Disable(); }
 
     void Update()
     {
-        if (cameraController == null) return;
+        if (!cameraController) return;
 
-        // 1) 读取 Grip 差值（右减左），正值 → 增；负值 → 减
-        float lg = ReadFloat(leftGrip);
-        float rg = ReadFloat(rightGrip);
-        float delta = SignedDelta(rg, lg, gripDeadZone); // [-1,1]
+        // --- Grip 输入 ---
+        float rg = Mathf.Clamp01(ReadFloat(rightGrip));
+        float lg = Mathf.Clamp01(ReadFloat(leftGrip));
+        float delta = Mathf.Clamp(EvalGrip(rg) - EvalGrip(lg), -1f, 1f);
+        bool isAdjusting = Mathf.Abs(delta) > 0.01f;
 
-        // 2) 判断模式（A/B/X/Y 决定控制哪一个参数）
+        // --- 模式判定 ---
         bool a = ReadBool(buttonA);
         bool b = ReadBool(buttonB);
         bool x = ReadBool(buttonX);
         bool y = ReadBool(buttonY);
+        bool anyModeButton = a || b || x || y;
 
-        // 优先级：Y > X > B > A > 默认（焦距）
-        if      (y) AdjustShutter(delta);
-        else if (x) AdjustAperture(delta);
-        else if (b) AdjustISO(delta);
-        else if (a) AdjustFocusDistance(delta);
-        else        AdjustFocalLength(delta);
+        Mode mode = Mode.Focal;
+        if (y) mode = Mode.Shutter;
+        else if (x) mode = Mode.Aperture;
+        else if (b) mode = Mode.ISO;
+        else if (a) mode = Mode.Focus;
 
-        // 3) 右手 Trigger 拍照（支持 bool 或 float）
-        float tr = ReadFloat(rightTrigger);
-        bool triggerPressed = (tr >= triggerThreshold) || ReadBool(rightTrigger);
-        if (triggerPressed && !shutterDown)
+        // --- 参数调整 ---
+        switch (mode)
         {
-            shutterDown = true;
-            cameraController.CapturePhoto();  // 直接走你的保存逻辑
+            case Mode.Shutter:   AdjustShutter(delta);        break;
+            case Mode.Aperture:  AdjustAperture(delta);       break;
+            case Mode.ISO:       AdjustISO(delta);            break;
+            case Mode.Focus:     AdjustFocusDistance(delta);  break;
+            default:             AdjustFocalLength(delta);    break;
         }
-        else if (!triggerPressed)
-        {
-            shutterDown = false;
-        }
-        lastTrigger = tr;
+
+        // --- UI 高亮 ---
+        UpdateUIHighlight(mode, isAdjusting, anyModeButton);
+
+        // --- Trigger 拍照 ---
+        float t = Mathf.Clamp01(ReadFloat(rightTrigger));
+        if (lastTrigger < triggerThreshold && t >= triggerThreshold)
+            cameraController.CapturePhoto();
+        lastTrigger = t;
     }
 
-    float ReadFloat(InputActionReference r)
-      => (r!=null) ? r.action.ReadValue<float>() : 0f;
+    // ====================== 输入处理 ======================
+    float ReadFloat(InputActionReference r) => r ? r.action.ReadValue<float>() : 0f;
+
     bool ReadBool(InputActionReference r)
-      => (r!=null) && r.action.triggered || ((r!=null) && r.action.ReadValue<float>()>0.5f);
-
-    static float SignedDelta(float inc, float dec, float dead)
     {
-        float i = Mathf.Max(0f, inc - dead) / Mathf.Max(0.0001f, 1f - dead);
-        float d = Mathf.Max(0f, dec - dead) / Mathf.Max(0.0001f, 1f - dead);
-        return Mathf.Clamp(i - d, -1f, 1f);
+        if (!r) return false;
+        var a = r.action;
+        if (a == null) return false;
+
+        // 1) 明确是 Button，就用 IsPressed（处理死区/交互型按钮最稳）
+        if (a.type == InputActionType.Button)
+            return a.IsPressed();
+
+        // 2) 尝试根据绑定的 Control 类型判断是否为 float
+        var ctrl = a.activeControl != null ? a.activeControl : (a.controls.Count > 0 ? a.controls[0] : null);
+        if (ctrl != null && ctrl.valueType == typeof(float))
+            return a.ReadValue<float>() > 0.5f;
+
+        // 3) 回退方案：仍用 IsPressed
+        return a.IsPressed();
     }
 
-    // ---- 参数调整（直接改相机或滑块） ----
+    float EvalGrip(float v)
+    {
+        if (v <= gripDeadZone) return 0f;
+        float t = (v - gripDeadZone) / Mathf.Max(0.0001f, 1f - gripDeadZone);
+        return Mathf.Clamp01(gripCurve.Evaluate(t));
+    }
+
+    // ====================== 相机控制 ======================
     void AdjustFocalLength(float dir)
     {
-        if (Mathf.Approximately(dir, 0f)) return;
+        if (Mathf.Approximately(dir, 0)) return;
         var c = cameraController.photographyCamera;
         c.usePhysicalProperties = true;
         c.focalLength = Mathf.Clamp(c.focalLength + dir * focalStepPerSec * Time.deltaTime, 1f, 300f);
@@ -111,30 +156,75 @@ public class XRPhotoInput : MonoBehaviour
     }
     void AdjustFocusDistance(float dir)
     {
-        if (Mathf.Approximately(dir, 0f)) return;
+        if (Mathf.Approximately(dir, 0)) return;
         var c = cameraController.photographyCamera;
-        c.focusDistance = Mathf.Clamp(c.focusDistance + dir * focusStepPerSec * Time.deltaTime, 0.1f, 100f);
+        c.focusDistance = Mathf.Clamp(c.focusDistance + dir * focusStepPerSec * Time.deltaTime, 0.05f, 200f);
         cameraController.OnParameterChanged();
     }
     void AdjustISO(float dir)
     {
-        if (Mathf.Approximately(dir, 0f)) return;
+        if (Mathf.Approximately(dir, 0)) return;
         var c = cameraController.photographyCamera;
-        c.iso = Mathf.Clamp(Mathf.RoundToInt(c.iso + dir * isoStepPerSec * Time.deltaTime), 50, 12800);
+        c.iso = Mathf.Clamp(Mathf.RoundToInt(c.iso + dir * isoStepPerSec * Time.deltaTime), 50, 25600);
         cameraController.OnParameterChanged();
     }
     void AdjustAperture(float dir)
     {
-        if (Mathf.Approximately(dir, 0f)) return;
+        if (Mathf.Approximately(dir, 0)) return;
         var c = cameraController.photographyCamera;
-        c.aperture = Mathf.Clamp(c.aperture + dir * fStepPerSec * Time.deltaTime, 1.0f, 22f);
+        c.aperture = Mathf.Clamp(c.aperture + dir * apertureStepPerSec * Time.deltaTime, 1.0f, 22f);
         cameraController.OnParameterChanged();
     }
     void AdjustShutter(float dir)
     {
-        if (Mathf.Approximately(dir, 0f)) return;
+        if (Mathf.Approximately(dir, 0)) return;
         var c = cameraController.photographyCamera;
-        c.shutterSpeed = Mathf.Clamp(c.shutterSpeed + dir * shutterStepPerSec * Time.deltaTime, 1f/8000f, 1f);
+        c.shutterSpeed = Mathf.Clamp(c.shutterSpeed + dir * shutterStepPerSec * Time.deltaTime, 1f / 8000f, 1f);
         cameraController.OnParameterChanged();
+    }
+
+    // ====================== UI 高亮控制 ======================
+    void UpdateUIHighlight(Mode current, bool isAdjusting, bool anyModeButton)
+    {
+        // 焦距常亮，其它根据模式变化
+        float tfocal = (current == Mode.Focal && !anyModeButton) ? 1f : 0f;
+        float tfocus = current == Mode.Focus ? 1f : 0f;
+        float tiso = current == Mode.ISO ? 1f : 0f;
+        float taperture = current == Mode.Aperture ? 1f : 0f;
+        float tshutter = current == Mode.Shutter ? 1f : 0f;
+
+        float s = highlightSpeed * Time.unscaledDeltaTime;
+        focalUI.weight = Mathf.MoveTowards(focalUI.weight, tfocal, s);
+        focusUI.weight = Mathf.MoveTowards(focusUI.weight, tfocus, s);
+        isoUI.weight = Mathf.MoveTowards(isoUI.weight, tiso, s);
+        apertureUI.weight = Mathf.MoveTowards(apertureUI.weight, taperture, s);
+        shutterUI.weight = Mathf.MoveTowards(shutterUI.weight, tshutter, s);
+
+        // 脉动亮度（当前模式 + 正在调整）
+        float pulseMul = 1f;
+        if (pulseWhileAdjusting && isAdjusting)
+        {
+            pulseMul = Mathf.Lerp(1f, pulseIntensity,
+                0.5f + 0.5f * Mathf.Sin(Time.unscaledTime * Mathf.PI * 2f * pulseSpeed));
+        }
+
+        ApplyColor(focalUI,    current == Mode.Focal    ? pulseMul : 1f);
+        ApplyColor(focusUI,    current == Mode.Focus    ? pulseMul : 1f);
+        ApplyColor(isoUI,      current == Mode.ISO      ? pulseMul : 1f);
+        ApplyColor(apertureUI, current == Mode.Aperture ? pulseMul : 1f);
+        ApplyColor(shutterUI,  current == Mode.Shutter  ? pulseMul : 1f);
+    }
+
+    void ApplyColor(ParamUI ui, float pulseMul)
+    {
+        if (!ui.bg) return;
+        Color baseColor = Color.Lerp(normalColor, ui.themeColor, ui.weight);
+        if (pulseMul > 1f)
+        {
+            Color bright = baseColor * pulseMul;
+            bright.a = baseColor.a;
+            baseColor = bright;
+        }
+        ui.bg.color = baseColor;
     }
 }
