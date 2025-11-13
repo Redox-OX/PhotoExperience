@@ -6,9 +6,13 @@ using UnityEngine.UI;
 
 public class ReturnToMainMenu : MonoBehaviour
 {
-    [Header("Input (bind to your Grip actions)")]
-    public InputActionReference leftGrip;   // 例如 XRI LeftHand/GripPressed（Button）
-    public InputActionReference rightGrip;  // 例如 XRI RightHand/GripPressed（Button）
+    // ====== 单例，跨场景只保留一个 ======
+    private static ReturnToMainMenu _instance;
+
+    [Header("Input (LEFT trigger)")]
+    // 这里绑定到 XRI LeftHand / Select 或任何代表左 Trigger 的 Action
+    public InputActionReference leftTrigger;
+    [Range(0f, 1f)] public float triggerThreshold = 0.2f; // 大于这个值算“按住”
 
     [Header("Behavior")]
     [Min(0f)] public float holdSeconds = 3.0f;
@@ -18,90 +22,82 @@ public class ReturnToMainMenu : MonoBehaviour
 
     [Header("UI Progress")]
     public bool showProgressUI = true;
-    [Range(0.5f, 4f)] public float uiScale = 1.0f;  // 进度环大小倍数
-    public Color ringColor = new Color(1f,1f,1f,0.95f);
-    public Color bgColor   = new Color(0f,0f,0f,0.35f);
+    [Range(0.5f, 4f)] public float uiScale = 1.0f;
+    public Color ringColor = new Color(1f, 1f, 1f, 0.95f);
+    public Color bgColor   = new Color(0f, 0f, 0f, 0.35f);
 
+    // 状态
     private float holdStart = -1f;
-    private bool leftDown, rightDown;
-    private bool busy;  // 正在切场
+    private bool busy;
     private float lastReturnTime = -999f;
 
-    // 进度 UI
+    // UI
     private Canvas uiCanvas;
     private CanvasGroup uiGroup;
     private Image ring;
     private Image ringBg;
-    private const float RingSize = 120f; // 初始像素尺寸
+    private const float RingSize = 120f;
 
     void Awake()
     {
+        // 单例：后面场景再出现同脚本就直接删掉
+        if (_instance != null && _instance != this)
+        {
+            Destroy(gameObject);
+            return;
+        }
+
+        _instance = this;
         DontDestroyOnLoad(gameObject);
-        HookInputs(true);
+
+        if (leftTrigger != null)
+            leftTrigger.action.Enable();
+
         if (showProgressUI) BuildUI();
         SetProgressVisible(false);
     }
 
     void OnDestroy()
     {
-        HookInputs(false);
-        if (uiCanvas) Destroy(uiCanvas.gameObject);
-    }
+        if (_instance == this) _instance = null;
 
-    private void HookInputs(bool on)
-    {
-        if (leftGrip != null)
-        {
-            if (on)
-            {
-                leftGrip.action.started  += OnLeftStarted;
-                leftGrip.action.canceled += OnLeftCanceled;
-                leftGrip.action.Enable();
-            }
-            else
-            {
-                leftGrip.action.started  -= OnLeftStarted;
-                leftGrip.action.canceled -= OnLeftCanceled;
-            }
-        }
-        if (rightGrip != null)
-        {
-            if (on)
-            {
-                rightGrip.action.started  += OnRightStarted;
-                rightGrip.action.canceled += OnRightCanceled;
-                rightGrip.action.Enable();
-            }
-            else
-            {
-                rightGrip.action.started  -= OnRightStarted;
-                rightGrip.action.canceled -= OnRightCanceled;
-            }
-        }
+        if (leftTrigger != null)
+            leftTrigger.action.Disable();
+
+        if (uiCanvas) Destroy(uiCanvas.gameObject);
     }
 
     void Update()
     {
         if (busy) return;
+
+        // 在主菜单时如果不需要此功能
         if (ignoreWhenInMain && SceneManager.GetActiveScene().name == mainMenuScene)
         {
             ResetProgress();
             return;
         }
 
-        bool both = leftDown && rightDown;
+        // ====== 每帧轮询左 Trigger 值 ======
+        float triggerValue = 0f;
+        if (leftTrigger != null)
+            triggerValue = leftTrigger.action.ReadValue<float>();
 
-        if (both)
+        bool isDown = triggerValue > triggerThreshold;
+
+        if (isDown)
         {
             if (holdStart < 0f) holdStart = Time.unscaledTime;
 
-            float t = Mathf.Clamp01((Time.unscaledTime - holdStart) / Mathf.Max(0.0001f, holdSeconds));
+            float t = Mathf.Clamp01(
+                (Time.unscaledTime - holdStart) /
+                Mathf.Max(0.0001f, holdSeconds)
+            );
             UpdateProgress(t);
 
             if (t >= 1f && Time.unscaledTime - lastReturnTime > cooldownAfterReturn)
             {
-                // 触发返回主界面
-                StartCoroutine(ReturnToMainRoutine());
+                StartCoroutine(ReturnRoutine());
             }
         }
         else
@@ -110,70 +106,69 @@ public class ReturnToMainMenu : MonoBehaviour
         }
     }
 
-    // ==== Input callbacks ====
-    private void OnLeftStarted(InputAction.CallbackContext _)  { leftDown  = true;  }
-    private void OnLeftCanceled(InputAction.CallbackContext _) { leftDown  = false; }
-    private void OnRightStarted(InputAction.CallbackContext _) { rightDown = true;  }
-    private void OnRightCanceled(InputAction.CallbackContext _){ rightDown = false; }
-
-    // ==== UI ====
+    // ========== UI 构建 ==========
     private void BuildUI()
-    {
-        uiCanvas = new GameObject("GripHoldUI").AddComponent<Canvas>();
-        uiCanvas.renderMode = RenderMode.ScreenSpaceOverlay;
-        uiCanvas.sortingOrder = short.MaxValue; // 最前
-        uiGroup = uiCanvas.gameObject.AddComponent<CanvasGroup>();
-        uiGroup.alpha = 0f;
-        uiGroup.blocksRaycasts = false;
+{
+    uiCanvas = new GameObject("ReturnToMainMenuUI").AddComponent<Canvas>();
+    uiCanvas.renderMode = RenderMode.ScreenSpaceOverlay;
+    uiCanvas.sortingOrder = short.MaxValue;
+    uiGroup = uiCanvas.gameObject.AddComponent<CanvasGroup>();
+    uiGroup.alpha = 0f;
+    uiGroup.blocksRaycasts = false;
 
-        // 背景圆
-        var bgGO = new GameObject("RingBG");
-        ringBg = bgGO.AddComponent<Image>();
-        ringBg.color = bgColor;
-        ringBg.raycastTarget = false;
-        var bgRt = ringBg.rectTransform;
-        bgGO.transform.SetParent(uiCanvas.transform, false);
-        bgRt.sizeDelta = Vector2.one * RingSize;
-        bgRt.anchoredPosition = Vector2.zero;
-        bgRt.anchorMin = bgRt.anchorMax = new Vector2(0.5f, 0.5f);
-        bgRt.localScale = Vector3.one * uiScale;
-        ringBg.type = Image.Type.Filled; // 仅为统一圆角
-        ringBg.fillMethod = Image.FillMethod.Radial360;
-        ringBg.fillAmount = 1f;
+    // 用 whiteTexture 生成一个 Sprite，尺寸必须用真实宽高（4x4）
+    var tex = Texture2D.whiteTexture;
+    Sprite whiteSprite = Sprite.Create(
+        tex,
+        new Rect(0, 0, tex.width, tex.height),
+        new Vector2(0.5f, 0.5f)
+    );
 
-        // 前景进度圆
-        var ringGO = new GameObject("Ring");
-        ring = ringGO.AddComponent<Image>();
-        ring.color = ringColor;
-        ring.raycastTarget = false;
-        var rt = ring.rectTransform;
-        ringGO.transform.SetParent(uiCanvas.transform, false);
-        rt.sizeDelta = Vector2.one * (RingSize - 12f);
-        rt.anchoredPosition = Vector2.zero;
-        rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0.5f);
-        rt.localScale = Vector3.one * uiScale;
+    // ===== 背景圆 =====
+    var bgGO = new GameObject("RingBG");
+    ringBg = bgGO.AddComponent<Image>();
+    ringBg.sprite = whiteSprite;        // ★ 必须有 sprite
+    ringBg.color = bgColor;
+    ringBg.raycastTarget = false;
 
-        ring.type = Image.Type.Filled;
-        ring.fillMethod = Image.FillMethod.Radial360;
-        ring.fillOrigin = (int)Image.Origin360.Top; // 从上往下转
-        ring.fillClockwise = true;
-        ring.fillAmount = 0f;
+    var bgRt = ringBg.rectTransform;
+    bgGO.transform.SetParent(uiCanvas.transform, false);
+    bgRt.anchorMin = bgRt.anchorMax = new Vector2(0.5f, 0.5f);
+    bgRt.anchoredPosition = Vector2.zero;
+    bgRt.sizeDelta = Vector2.one * RingSize;
+    bgRt.localScale = Vector3.one * uiScale;
 
-        // 中心小点（可选）
-        var dotGO = new GameObject("Dot");
-        var dot = dotGO.AddComponent<Image>();
-        dot.color = new Color(ringColor.r, ringColor.g, ringColor.b, 0.8f);
-        dot.raycastTarget = false;
-        var drt = dot.rectTransform;
-        dotGO.transform.SetParent(uiCanvas.transform, false);
-        drt.sizeDelta = Vector2.one * 6f;
-        drt.anchoredPosition = new Vector2(0f, -(RingSize * 0.5f - 8f)) * uiScale;
-        drt.anchorMin = drt.anchorMax = new Vector2(0.5f, 0.5f);
-    }
+    ringBg.type = Image.Type.Filled;
+    ringBg.fillMethod = Image.FillMethod.Radial360;
+    ringBg.fillAmount = 1f;
+
+    // ===== 前景进度圆 =====
+    var ringGO = new GameObject("Ring");
+    ring = ringGO.AddComponent<Image>();
+    ring.sprite = whiteSprite;          // ★ 同样必须有 sprite
+    ring.color = ringColor;
+    ring.raycastTarget = false;
+
+    var rt = ring.rectTransform;
+    ringGO.transform.SetParent(uiCanvas.transform, false);
+    rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0.5f);
+    rt.anchoredPosition = Vector2.zero;
+    rt.sizeDelta = Vector2.one * (RingSize - 12f);
+    rt.localScale = Vector3.one * uiScale;
+
+    ring.type = Image.Type.Filled;
+    ring.fillMethod = Image.FillMethod.Radial360;
+    ring.fillOrigin = (int)Image.Origin360.Top;
+    ring.fillClockwise = true;
+    ring.fillAmount = 0f;
+}
+
+
+
 
     private void UpdateProgress(float t01)
     {
-        if (!showProgressUI) return;
+        if (!showProgressUI || ring == null) return;
         SetProgressVisible(true);
         ring.fillAmount = t01;
     }
@@ -181,7 +176,7 @@ public class ReturnToMainMenu : MonoBehaviour
     private void ResetProgress()
     {
         holdStart = -1f;
-        if (showProgressUI)
+        if (showProgressUI && ring != null)
         {
             ring.fillAmount = 0f;
             SetProgressVisible(false);
@@ -193,20 +188,17 @@ public class ReturnToMainMenu : MonoBehaviour
         if (uiGroup) uiGroup.alpha = on ? 1f : 0f;
     }
 
-    // ==== Return ====
-    private IEnumerator ReturnToMainRoutine()
+    // ========== 返回主菜单 ==========
+    private IEnumerator ReturnRoutine()
     {
         busy = true;
         lastReturnTime = Time.unscaledTime;
 
-        // 可加一次轻震动：留给你在各自手部控制器里调用（此处略）
-
         if (SceneFader.Instance != null)
         {
             SceneFader.Instance.FadeAndLoad(mainMenuScene, 0.25f, 0.25f);
-            // 等待场景切换完成（简单办法：等到场景变为主菜单）
-            string target = mainMenuScene;
-            while (SceneManager.GetActiveScene().name != target) yield return null;
+            while (SceneManager.GetActiveScene().name != mainMenuScene)
+                yield return null;
         }
         else
         {
@@ -215,7 +207,6 @@ public class ReturnToMainMenu : MonoBehaviour
         }
 
         ResetProgress();
-        // 主菜单一般不需要此功能，若仍常驻可由 ignoreWhenInMain 屏蔽
         busy = false;
     }
 }
